@@ -160,7 +160,7 @@ Dữ liệu ASVspoof **không được lưu trên repo** do kích thước lớn
 
 | Dataset | Link | Kích thước |
 |---|---|---|
-| ASVspoof 2019 LA | [asvspoof.org](https://www.asvspoof.org/) | ~9 GB |
+| ASVspoof 2019 LA | [asvspoof.org](https://datashare.ed.ac.uk/handle/10283/3336) | ~9 GB |
 | ASVspoof 2021 LA | [zenodo.org/record/4837263](https://zenodo.org/record/4837263) | ~19 GB |
 
 Sau khi tải, giải nén vào thư mục `data/raw/` theo đúng cấu trúc ở trên.

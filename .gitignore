@@ -1,0 +1,57 @@
+# =========================
+# Data
+# =========================
+data/raw/
+data/output_npy_2019/
+data/output_npy_2021/
+data/**/*.zip
+data/**/*.rar
+
+# =========================
+# Training artifacts
+# =========================
+outputs/checkpoints/
+
+# Keep lightweight report artifacts
+!outputs/results/
+!outputs/figures/
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+
+# =========================
+# Environments
+# =========================
+.env
+.venv/
+venv/
+env/
+
+# =========================
+# Experiment tools
+# =========================
+wandb/
+*.log
+
+# =========================
+# IDE / OS
+# =========================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# =========================
+# Temp
+# =========================
+tmp_verify_data/
+tmp_verify_outputs/

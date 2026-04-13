@@ -14,7 +14,13 @@ import pandas as pd
 import torch
 
 from src.models import build_model
-from src.utils.dataset import SpoofDataset, build_2019_samples, resolve_feature_directory
+from src.utils.dataset import (
+    SpoofDataset,
+    build_2019_samples,
+    resolve_data_root,
+    resolve_external_labels_path,
+    resolve_feature_directory,
+)
 from train import ExperimentConfig, _build_signature, checkpoint_paths_for_config, train_experiment
 
 
@@ -33,24 +39,14 @@ def _make_feature(utt_id: str, feature_dim: int, frames: int, scale: float = 1.0
     return (values.reshape(feature_dim, frames) * scale) + (hash(utt_id) % 13) * 0.01
 
 
+def _canonical_feature_dir(root: Path, feature_name: str, split: str) -> Path:
+    bundle_name = "output_npy_2021" if split == "eval_2021" else "output_npy_2019"
+    feature_dir = "output_spectrogram" if feature_name == "spectrogram" else f"output_{feature_name}"
+    return root / "features" / bundle_name / feature_dir / split
+
+
 def _populate_feature_dir(root: Path, feature_name: str, split: str, rows: list[tuple[str, str]], feature_dim: int, frames: int):
-    split_dir = root / "features" / feature_name / split
-    split_dir.mkdir(parents=True, exist_ok=True)
-    for index, (utt_id, _) in enumerate(rows, start=1):
-        feature = _make_feature(utt_id, feature_dim=feature_dim, frames=frames + index)
-        np.save(split_dir / f"{utt_id}.npy", feature)
-
-
-def _populate_bundle_feature_dir(
-    root: Path,
-    bundle_name: str,
-    feature_name: str,
-    split: str,
-    rows: list[tuple[str, str]],
-    feature_dim: int,
-    frames: int,
-) -> None:
-    split_dir = root / bundle_name / f"output_{feature_name}" / split
+    split_dir = _canonical_feature_dir(root, feature_name, split)
     split_dir.mkdir(parents=True, exist_ok=True)
     for index, (utt_id, _) in enumerate(rows, start=1):
         feature = _make_feature(utt_id, feature_dim=feature_dim, frames=frames + index)
@@ -80,7 +76,8 @@ class PipelineSmokeTests(unittest.TestCase):
             _populate_feature_dir(self.data_root, feature_name, "eval", eval_rows, feature_dim=16, frames=48)
             _populate_feature_dir(self.data_root, feature_name, "eval_2021", eval_2021_rows, feature_dim=16, frames=48)
 
-        labels_path = self.root / "labels_2021.csv"
+        labels_path = self.data_root / "features" / "output_npy_2021" / "labels_eval_2021.csv"
+        labels_path.parent.mkdir(parents=True, exist_ok=True)
         with labels_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=["utt_id", "label"])
             writer.writeheader()
@@ -161,27 +158,28 @@ class PipelineSmokeTests(unittest.TestCase):
         self.assertAlmostEqual(float(optimized_tensor_b.mean()), 0.0, places=4)
         self.assertFalse(torch.equal(optimized_tensor_a, optimized_tensor_b))
 
-    def test_resolve_feature_directory_supports_raw_output_layout(self) -> None:
-        raw_root = self.root / "raw-layout-data"
-        train_rows = [("LA_T_1001", "bonafide"), ("LA_T_1002", "spoof")]
-        eval_2021_rows = [("LA_E_2021_1001", "bonafide"), ("LA_E_2021_1002", "spoof")]
+    def test_resolve_feature_directory_uses_canonical_layout(self) -> None:
+        train_dir = resolve_feature_directory(feature_name="mfcc", split="train", data_root=self.data_root)
+        eval_2021_dir = resolve_feature_directory(feature_name="mfcc", split="eval_2021", data_root=self.data_root)
 
-        _populate_bundle_feature_dir(raw_root / "raw", "output_npy_2019", "mfcc", "train", train_rows, feature_dim=16, frames=48)
-        _populate_bundle_feature_dir(
-            raw_root / "raw",
-            "output_npy_2021",
-            "mfcc",
-            "eval_2021",
-            eval_2021_rows,
-            feature_dim=16,
-            frames=48,
+        self.assertEqual(train_dir, self.data_root / "features" / "output_npy_2019" / "output_mfcc" / "train")
+        self.assertEqual(eval_2021_dir, self.data_root / "features" / "output_npy_2021" / "output_mfcc" / "eval_2021")
+
+    def test_resolve_external_labels_path_uses_canonical_2021_file(self) -> None:
+        labels_path = resolve_external_labels_path(data_root=self.data_root)
+        self.assertEqual(labels_path, self.data_root / "features" / "output_npy_2021" / "labels_eval_2021.csv")
+
+    def test_resolve_data_root_rejects_bundle_like_paths(self) -> None:
+        invalid_roots = (
+            self.data_root / "features",
+            self.data_root / "features" / "output_npy_2019",
+            self.data_root / "features" / "output_npy_2021",
         )
 
-        train_dir = resolve_feature_directory(feature_name="mfcc", split="train", data_root=raw_root)
-        eval_2021_dir = resolve_feature_directory(feature_name="mfcc", split="eval_2021", data_root=raw_root)
-
-        self.assertEqual(train_dir, raw_root / "raw" / "output_npy_2019" / "output_mfcc" / "train")
-        self.assertEqual(eval_2021_dir, raw_root / "raw" / "output_npy_2021" / "output_mfcc" / "eval_2021")
+        for invalid_root in invalid_roots:
+            with self.subTest(data_root=invalid_root):
+                with self.assertRaisesRegex(ValueError, "parent data directory"):
+                    resolve_data_root(invalid_root)
 
     def test_model_forward_shapes(self) -> None:
         batch = torch.randn(2, 1, 16, 32)

@@ -2,6 +2,7 @@
 # Data
 # =========================
 data/raw/
+data/features/
 data/output_npy_2019/
 data/output_npy_2021/
 data/**/*.zip

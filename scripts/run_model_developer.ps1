@@ -42,6 +42,27 @@ function Add-OptionalArgument {
     }
 }
 
+function Resolve-ValidatedDataRoot {
+    param(
+        [string]$DataRoot
+    )
+
+    $trimmed = $DataRoot.TrimEnd('\', '/')
+    if ([string]::IsNullOrWhiteSpace($trimmed)) {
+        throw "--data_root must point to the parent data directory (for example 'data'), not an empty path."
+    }
+
+    $segments = $trimmed -split '[\\/]'
+    $leaf = $segments[-1].ToLowerInvariant()
+    $tail = @($segments | Select-Object -Last ([Math]::Min(4, $segments.Count)) | ForEach-Object { $_.ToLowerInvariant() })
+
+    if ($leaf -eq "features" -or $tail -contains "output_npy_2019" -or $tail -contains "output_npy_2021") {
+        throw "--data_root must point to the parent data directory (for example 'data'), not '$DataRoot'."
+    }
+
+    return $trimmed
+}
+
 function Resolve-Eval2021Labels {
     param(
         [string]$DataRoot,
@@ -56,35 +77,9 @@ function Resolve-Eval2021Labels {
         throw "Could not locate ASVspoof2021 labels file: $ExplicitPath"
     }
 
-    $candidates = [System.Collections.Generic.List[string]]::new()
-
-    if (-not [string]::IsNullOrWhiteSpace($FeatureRoot)) {
-        $candidates.Add((Join-Path $FeatureRoot "labels_eval_2021.csv"))
-        $featureParent = Split-Path -Parent $FeatureRoot
-        if (-not [string]::IsNullOrWhiteSpace($featureParent)) {
-            $candidates.Add((Join-Path $featureParent "labels_eval_2021.csv"))
-        }
-    }
-
-    $roots = @($DataRoot, (Join-Path $DataRoot "raw"))
-    $bundleRoots = @("features", "output_npy", "output_npy_2021")
-    $featureDirs = @("mfcc", "lfcc", "spectrogram", "spec", "output_mfcc", "output_lfcc", "output_spec", "output_spectrogram")
-
-    foreach ($root in $roots) {
-        $candidates.Add((Join-Path $root "labels_eval_2021.csv"))
-        foreach ($bundleRoot in $bundleRoots) {
-            $bundlePath = Join-Path $root $bundleRoot
-            $candidates.Add((Join-Path $bundlePath "labels_eval_2021.csv"))
-            foreach ($featureDir in $featureDirs) {
-                $candidates.Add((Join-Path (Join-Path $bundlePath $featureDir) "labels_eval_2021.csv"))
-            }
-        }
-    }
-
-    foreach ($candidate in ($candidates | Select-Object -Unique)) {
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-            return $candidate
-        }
+    $canonicalCandidate = Join-Path (Join-Path (Join-Path $DataRoot "features") "output_npy_2021") "labels_eval_2021.csv"
+    if (Test-Path -LiteralPath $canonicalCandidate -PathType Leaf) {
+        return $canonicalCandidate
     }
 
     return $null
@@ -176,6 +171,7 @@ function Invoke-ProfileTraining {
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
+$DataRoot = Resolve-ValidatedDataRoot -DataRoot $DataRoot
 
 $baselineCheckpointInfo = Get-CheckpointInfo -Profile "baseline" -Model "cnn" -Feature "mfcc"
 $optimizedCheckpointInfo = Get-CheckpointInfo -Profile "optimized" -Model "lcnn" -Feature "lfcc"

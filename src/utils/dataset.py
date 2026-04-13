@@ -5,7 +5,7 @@ import random
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import torch
@@ -27,18 +27,17 @@ PROTOCOL_FILES = {
     "eval": "ASVspoof2019.LA.cm.eval.trl.txt",
 }
 EXTERNAL_2021_LABELS_FILE = "labels_eval_2021.csv"
-
-FEATURE_DIR_ALIASES = {
-    "mfcc": ("mfcc", "output_mfcc"),
-    "lfcc": ("lfcc", "output_lfcc"),
-    "spectrogram": ("spectrogram", "spec", "output_spec", "output_spectrogram"),
-}
-
-SPLIT_ALIASES = {
-    "train": ("train",),
-    "dev": ("dev", "val"),
-    "eval": ("eval", "test"),
-    "eval_2021": ("eval_2021", "2021_eval", "eval"),
+CANONICAL_2019_BUNDLE = "output_npy_2019"
+CANONICAL_2021_BUNDLE = "output_npy_2021"
+CANONICAL_FEATURE_DIRS = {
+    "mfcc": "output_mfcc",
+    "output_mfcc": "output_mfcc",
+    "lfcc": "output_lfcc",
+    "output_lfcc": "output_lfcc",
+    "spectrogram": "output_spectrogram",
+    "spec": "output_spectrogram",
+    "output_spec": "output_spectrogram",
+    "output_spectrogram": "output_spectrogram",
 }
 
 
@@ -60,48 +59,36 @@ def canonicalize_label(label: object) -> int:
 
 def resolve_data_root(data_root: str | Path) -> Path:
     root = Path(data_root)
-    if root.name == "data":
-        return root
-    nested = root / "data"
-    if nested.exists():
-        return nested
+    trailing_parts = [part.lower() for part in root.parts[-4:]]
+    if root.name.lower() == "features" or any(
+        part in {CANONICAL_2019_BUNDLE, CANONICAL_2021_BUNDLE} for part in trailing_parts
+    ):
+        raise ValueError(
+            f"--data_root must point to the parent data directory (for example 'data'), not '{root}'."
+        )
     return root
 
 
-def _existing_dir(candidates: Iterable[Path]) -> Optional[Path]:
-    for candidate in candidates:
-        if candidate.exists() and candidate.is_dir():
-            return candidate
-    return None
+def _canonical_feature_directory_name(feature_name: str) -> str:
+    normalized = feature_name.strip().lower()
+    if normalized in CANONICAL_FEATURE_DIRS:
+        return CANONICAL_FEATURE_DIRS[normalized]
+    if normalized.startswith("output_"):
+        return normalized
+    return f"output_{normalized}"
 
 
-def _feature_candidates(data_root: Path, feature_name: str, split: str) -> List[Path]:
-    aliases = FEATURE_DIR_ALIASES.get(feature_name, (feature_name,))
-    split_aliases = SPLIT_ALIASES.get(split, (split,))
-    candidates: List[Path] = []
+def _expected_feature_directory(data_root: Path, feature_name: str, split: str) -> Path:
+    feature_dir = _canonical_feature_directory_name(feature_name)
+    if split == "eval_2021":
+        return data_root / "features" / CANONICAL_2021_BUNDLE / feature_dir / "eval_2021"
+    if split in PROTOCOL_FILES:
+        return data_root / "features" / CANONICAL_2019_BUNDLE / feature_dir / split
+    raise ValueError(f"Unsupported split '{split}'. Expected one of: train, dev, eval, eval_2021")
 
-    search_roots = (data_root, data_root / "raw")
-    bundle_roots = ("features", "output_npy", "output_npy_2019", "output_npy_2021")
 
-    for feature_alias in aliases:
-        for split_alias in split_aliases:
-            for root in search_roots:
-                for bundle_root in bundle_roots:
-                    candidates.extend(
-                        [
-                            root / bundle_root / feature_alias / split_alias,
-                            root / bundle_root / feature_name / split_alias,
-                            root / bundle_root / f"output_{feature_name}" / split_alias,
-                            root / bundle_root / f"output_{feature_alias}" / split_alias,
-                        ]
-                    )
-                candidates.extend(
-                    [
-                        root / feature_alias / split_alias,
-                        root / feature_name / split_alias,
-                    ]
-                )
-    return candidates
+def _expected_external_labels_path(data_root: Path) -> Path:
+    return data_root / "features" / CANONICAL_2021_BUNDLE / EXTERNAL_2021_LABELS_FILE
 
 
 def resolve_feature_directory(
@@ -112,20 +99,19 @@ def resolve_feature_directory(
 ) -> Path:
     if feature_root is not None:
         root = Path(feature_root)
-        split_dir = _existing_dir(root / split_alias for split_alias in SPLIT_ALIASES.get(split, (split,)))
-        if split_dir is not None:
+        split_dir = root / split
+        if split_dir.exists() and split_dir.is_dir():
             return split_dir
         if root.exists() and root.is_dir() and any(root.glob("*.npy")):
             return root
         raise FileNotFoundError(f"Could not resolve feature directory from explicit root: {root}")
 
     resolved_data_root = resolve_data_root(data_root)
-    candidates = _feature_candidates(resolved_data_root, feature_name, split)
-    feature_dir = _existing_dir(candidates)
-    if feature_dir is None:
+    feature_dir = _expected_feature_directory(resolved_data_root, feature_name, split)
+    if not feature_dir.exists() or not feature_dir.is_dir():
         raise FileNotFoundError(
-            f"Could not locate feature directory for feature='{feature_name}', split='{split}'. "
-            f"Searched under: {resolved_data_root}"
+            f"Could not locate feature directory for feature='{feature_name}', split='{split}' at '{feature_dir}'. "
+            "Use --data_root as the parent data directory, for example 'data'."
         )
     return feature_dir
 
@@ -228,38 +214,15 @@ def resolve_external_labels_path(
             return candidate
         raise FileNotFoundError(f"Could not locate ASVspoof2021 labels file: {candidate}")
 
-    candidates: List[Path] = []
-    if feature_root is not None:
-        root = Path(feature_root)
-        candidates.extend([root / EXTERNAL_2021_LABELS_FILE, root.parent / EXTERNAL_2021_LABELS_FILE])
-
+    _ = feature_root
     resolved_data_root = resolve_data_root(data_root)
-    search_roots = (resolved_data_root, resolved_data_root / "raw")
-    feature_aliases = sorted(
-        set(FEATURE_DIR_ALIASES.keys())
-        | {alias for aliases in FEATURE_DIR_ALIASES.values() for alias in aliases}
-    )
-
-    for root in search_roots:
-        candidates.append(root / EXTERNAL_2021_LABELS_FILE)
-        for bundle_root in ("features", "output_npy", "output_npy_2021"):
-            bundle_path = root / bundle_root
-            candidates.append(bundle_path / EXTERNAL_2021_LABELS_FILE)
-            for feature_alias in feature_aliases:
-                candidates.append(bundle_path / feature_alias / EXTERNAL_2021_LABELS_FILE)
-
-    seen: set[str] = set()
-    for candidate in candidates:
-        normalized = str(candidate)
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        if candidate.exists() and candidate.is_file():
-            return candidate
+    candidate = _expected_external_labels_path(resolved_data_root)
+    if candidate.exists() and candidate.is_file():
+        return candidate
 
     raise FileNotFoundError(
-        "Could not locate ASVspoof2021 labels file 'labels_eval_2021.csv'. "
-        "Provide --eval_2021_labels explicitly or place the file under the ASVspoof2021 feature directory."
+        f"Could not locate ASVspoof2021 labels file at '{candidate}'. "
+        "Provide --eval_2021_labels explicitly or place the file at that canonical path."
     )
 
 

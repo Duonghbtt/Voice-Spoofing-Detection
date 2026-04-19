@@ -33,11 +33,11 @@ Dự án này xây dựng và so sánh các mô hình Deep Learning để **phâ
 
 | Thành viên | MSSV | Vai trò | Nhiệm vụ chính |
 |---|---|---|---|
-| [Tên Người 1] | 2xxxxxxx | **Feature Engineer** | Trích xuất đặc trưng MFCC / LFCC / Spectrogram, visualisation |
-| [Tên Người 2] | 2xxxxxxx | **Model Developer** | Xây dựng & huấn luyện CNN / ResNet / LCNN |
-| [Tên Người 3] | 2xxxxxxx | **Evaluator & Analyst** | Tính EER, generalization test, error analysis |
+| Đặng Quốc Dũng | B22DCKH019 | **Feature Engineer** | Trích xuất đặc trưng MFCC / LFCC / Spectrogram, visualisation |
+| Bùi Đức Đại | B22DCKH025 | **Model Developer** | Xây dựng & huấn luyện CNN / ResNet / LCNN |
+| Nguyễn Thế Dương | B22DCKH023 | **Evaluator & Analyst** | Tính EER, generalization test, error analysis |
 
-> 🎓 **Giảng viên hướng dẫn:** [Tên giảng viên] — Môn: Deep Learning — Học kỳ [X] năm [20XX–20XX]
+> 🎓 **Giảng viên hướng dẫn:** Ts.Nguyễn Xuân Đức — Môn: Deep Learning
 
 ---
 

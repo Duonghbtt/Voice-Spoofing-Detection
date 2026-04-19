@@ -1,0 +1,22 @@
+{
+  "generated_at": "2026-04-15T04:13:00.195199+00:00",
+  "model": "cnn",
+  "feature": "spectrogram",
+  "checkpoint": "outputs/checkpoints/cnn_spectrogram/best.ckpt",
+  "best_epoch": 34,
+  "metrics_2019": {
+    "eer": 0.18960831845577963,
+    "accuracy": 0.6010500161432963,
+    "num_samples": 71237
+  },
+  "metrics_2021": {
+    "eer": 0.5363732842334492,
+    "accuracy": 0.7604320993710815,
+    "num_samples": 101921
+  },
+  "config": {
+    "batch_size": 80,
+    "num_workers": 0,
+    "device": "cuda"
+  }
+}

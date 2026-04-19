@@ -1,0 +1,2 @@
+profile,model,feature,eer_2021,accuracy,num_samples,eer_2019,generalization_gap,checkpoint
+custom,resnet18,lfcc,0.4651545579741997,0.8021801198967828,101921,0.1561835169794172,0.30897104099478245,D:\Document\Four-year\Second semeter\Học sâu\BTL\Voice-Spoofing-Detection\outputs\checkpoints\resnet18_lfcc\best.ckpt

@@ -9,8 +9,8 @@ DIR_2021_KEYS = r'D:\DL\2021\keys\LA\CM\trial_metadata.txt'
 DIR_2021_EVAL = r'D:\DL\2021\ASVspoof2021_LA_eval'
 
 OUTPUT_ROOT = r'data\features'
-OUTPUT_2019_DIR = os.path.join(OUTPUT_ROOT, 'output_npy_2019', 'output_spectrogram')
-OUTPUT_2021_DIR = os.path.join(OUTPUT_ROOT, 'output_npy_2021', 'output_spectrogram')
+OUTPUT_2019_DIR = os.path.join(OUTPUT_ROOT, 'output_spectrogram_2019')
+OUTPUT_2021_DIR = os.path.join(OUTPUT_ROOT, 'output_spectrogram_2021')
 
 os.makedirs(OUTPUT_2019_DIR, exist_ok=True)
 os.makedirs(OUTPUT_2021_DIR, exist_ok=True)
@@ -68,7 +68,7 @@ def run_2019(subset):
     print(f"Hoan thanh Spectrogram 2019 {subset}")
 
 def run_2021():
-    out_dir = os.path.join(OUTPUT_2021_DIR, 'eval_2021')
+    out_dir = os.path.join(OUTPUT_2021_DIR, 'eval')
     os.makedirs(out_dir, exist_ok=True)
     
     df_meta = pd.read_csv(DIR_2021_KEYS, sep=r'\s+', header=None)
@@ -107,7 +107,7 @@ def run_2021():
                     labels_list.append([file_name, label_dict[file_name]])
                     
     pd.DataFrame(labels_list, columns=['filename', 'label']).to_csv(
-        os.path.join(OUTPUT_ROOT, 'output_npy_2021', 'labels_eval_2021.csv'),
+        os.path.join(OUTPUT_2021_DIR, 'labels_eval_2021.csv'),
         index=False,
     )
     print("Hoan thanh Spectrogram 2021 eval")

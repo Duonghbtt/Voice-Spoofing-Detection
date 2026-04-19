@@ -1,0 +1,2 @@
+profile,model,feature,accuracy,eer,num_samples,checkpoint
+custom,resnet18,mfcc,0.7621601134242038,0.14242216130518176,71237,D:\Document\Four-year\Second semeter\Học sâu\BTL\Voice-Spoofing-Detection\outputs\checkpoints\resnet18_mfcc\best.ckpt

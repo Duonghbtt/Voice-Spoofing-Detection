@@ -206,13 +206,13 @@ data/
 
 ```bash
 # CNN baseline với MFCC
-python train.py --feature mfcc --model cnn --epochs 50 --batch_size 64 --data_root data
+python train.py --feature mfcc --model cnn --epochs 50 --batch_size 256 --num_workers 4 --amp --device cuda --data_root data
 
 # ResNet với LFCC
-python train.py --feature lfcc --model resnet --epochs 50 --batch_size 32 --data_root data
+python train.py --feature lfcc --model resnet --epochs 50 --batch_size 256 --num_workers 4 --amp --device cuda --data_root data
 
 # LCNN với Spectrogram
-python train.py --feature spectrogram --model lcnn --epochs 50 --batch_size 32 --data_root data
+python train.py --feature spectrogram --model lcnn --epochs 50 --batch_size 128 --num_workers 4 --amp --device cuda --data_root data
 
 # Chạy toàn bộ 9 tổ hợp (3 feature × 3 model)
 bash scripts/run_all_experiments.sh

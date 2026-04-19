@@ -1,0 +1,2 @@
+profile,model,feature,eer_2019,eer_2021,generalization_gap,checkpoint
+optimized,lcnn,lfcc,0.8639271972195677,0.637154029667594,-0.22677316755197363,D:\Document\Four-year\Second semeter\Học sâu\BTL\Voice-Spoofing-Detection\outputs\checkpoints\optimized_lcnn_lfcc\best.ckpt

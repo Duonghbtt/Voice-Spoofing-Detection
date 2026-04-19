@@ -13,6 +13,7 @@ data
 # Training artifacts
 # =========================
 outputs/checkpoints/
+outputs_smoke*/
 
 # Keep lightweight report artifacts
 !outputs/results/
@@ -22,12 +23,18 @@ outputs/checkpoints/
 # Python
 # =========================
 __pycache__/
+**/__pycache__/
 *.pyc
 *.pyo
 *.pyd
 .ipynb_checkpoints/
 .pytest_cache/
+**/.pytest_cache/
 .mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
 
 # =========================
 # Environments
@@ -57,3 +64,4 @@ Desktop.ini
 # =========================
 tmp_verify_data/
 tmp_verify_outputs/
+tmp_*/

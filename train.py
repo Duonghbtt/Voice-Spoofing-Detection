@@ -6,24 +6,30 @@ import hashlib
 import json
 import math
 import random
-from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
-from torch.cuda.amp import GradScaler, autocast
+from torch.cuda.amp import GradScaler
 from torch.optim import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from src.models import build_model
-from src.utils.dataset import SpoofDataset, build_2019_samples, build_2021_samples
-from src.utils.metrics import EvaluationArtifacts, compute_accuracy, compute_confusion, compute_eer, logits_to_spoof_scores
+from src.models import build_model, canonicalize_model_name
+from src.utils.dataset import canonicalize_feature_name
+from src.utils.runtime import (
+    configure_torch_runtime,
+    create_spoof_dataloader,
+    default_batch_size,
+    experiment_output_paths,
+    resolve_device,
+    resolve_num_workers,
+    run_evaluation_loop,
+    upsert_rows,
+)
 from src.utils.visualize import save_learning_curve
 
 
@@ -32,7 +38,7 @@ SIGNATURE_VERSION = "v1"
 DEFAULT_MODEL_KWARGS = {
     "cnn": {"dropout": 0.3},
     "lcnn": {"dropout": 0.3},
-    "resnet": {},
+    "resnet18": {},
 }
 _MISSING = object()
 
@@ -41,31 +47,33 @@ PROFILE_PRESETS = {
         "model": "cnn",
         "feature": "mfcc",
         "epochs": 50,
-        "batch_size": 64,
         "lr": 1e-3,
         "scheduler": "step",
         "step_size": 15,
         "gamma": 0.5,
         "normalize": False,
         "specaugment": False,
-        "amp": False,
         "early_stopping_patience": None,
     },
     "optimized": {
         "model": "lcnn",
         "feature": "lfcc",
         "epochs": 50,
-        "batch_size": 32,
         "lr": 1e-3,
         "scheduler": "cosine",
         "step_size": 15,
         "gamma": 0.5,
         "normalize": True,
         "specaugment": True,
-        "amp": True,
         "early_stopping_patience": 8,
     },
 }
+COMBINATION_DEFAULTS = {
+    ("lcnn", "mfcc"): {
+        "normalize": True,
+    },
+}
+MAX_GRAD_NORM = 5.0
 
 
 @dataclass
@@ -86,11 +94,15 @@ class ExperimentConfig:
     early_stopping_patience: int | None
     data_root: str
     protocol_root: str | None
+    feature_root: str | None
     output_root: str
     seed: int
     num_workers: int
     device: str | None
+    batch_size_explicit: bool = False
     resume: bool = False
+    eval_2021: bool = False
+    eval_2021_labels: str | None = None
 
 
 def set_seed(seed: int) -> None:
@@ -101,14 +113,34 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def resolve_device(device_name: str | None = None) -> torch.device:
-    if device_name:
-        return torch.device(device_name)
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def _default_amp_enabled(device_name: str | None) -> bool:
+    return resolve_device(device_name).type == "cuda"
 
 
-def _default_batch_size(model_name: str) -> int:
-    return 64 if model_name == "cnn" else 32
+def _combination_defaults(model_name: str, feature_name: str) -> Dict[str, object]:
+    return copy.deepcopy(
+        COMBINATION_DEFAULTS.get(
+            (canonicalize_model_name(model_name), canonicalize_feature_name(feature_name)),
+            {},
+        )
+    )
+
+
+def _resolve_training_option(
+    *,
+    explicit_value: object,
+    preset: Mapping[str, object],
+    combination_defaults: Mapping[str, object],
+    key: str,
+    fallback: object,
+):
+    if explicit_value is not None:
+        return explicit_value
+    if key in preset:
+        return preset[key]
+    if key in combination_defaults:
+        return combination_defaults[key]
+    return fallback
 
 
 def build_experiment_config(args: argparse.Namespace) -> ExperimentConfig:
@@ -117,23 +149,46 @@ def build_experiment_config(args: argparse.Namespace) -> ExperimentConfig:
         profile = "baseline"
 
     preset = PROFILE_PRESETS.get(profile or "", {})
-    model = args.model or preset.get("model") or "cnn"
-    feature = args.feature or preset.get("feature") or "mfcc"
+    model = canonicalize_model_name(args.model or preset.get("model") or "cnn")
+    feature = canonicalize_feature_name(args.feature or preset.get("feature") or "mfcc")
+    combination_defaults = _combination_defaults(model, feature)
+
+    # Batch size duoc chon theo tung to hop de tranh tran VRAM tren RTX 3050 Ti.
+    batch_size = args.batch_size if args.batch_size is not None else default_batch_size(model, feature, device_name=args.device)
+    # Windows nen giu worker thap de on dinh va khong vuot gioi han RAM.
+    num_workers = resolve_num_workers(args.num_workers)
+    amp_enabled = args.amp if args.amp is not None else _default_amp_enabled(args.device)
 
     return ExperimentConfig(
         profile=profile or "custom",
         model=model,
         feature=feature,
         epochs=args.epochs if args.epochs is not None else preset.get("epochs", 50),
-        batch_size=args.batch_size if args.batch_size is not None else preset.get("batch_size", _default_batch_size(model)),
+        batch_size=batch_size,
         lr=args.lr if args.lr is not None else preset.get("lr", 1e-3),
         scheduler=args.scheduler or preset.get("scheduler", "step"),
         step_size=args.step_size if args.step_size is not None else preset.get("step_size", 15),
         gamma=args.gamma if args.gamma is not None else preset.get("gamma", 0.5),
         target_frames=args.target_frames,
-        normalize=args.normalize if args.normalize is not None else preset.get("normalize", False),
-        specaugment=args.specaugment if args.specaugment is not None else preset.get("specaugment", False),
-        amp=args.amp if args.amp is not None else preset.get("amp", False),
+        normalize=bool(
+            _resolve_training_option(
+                explicit_value=args.normalize,
+                preset=preset,
+                combination_defaults=combination_defaults,
+                key="normalize",
+                fallback=False,
+            )
+        ),
+        specaugment=bool(
+            _resolve_training_option(
+                explicit_value=args.specaugment,
+                preset=preset,
+                combination_defaults=combination_defaults,
+                key="specaugment",
+                fallback=False,
+            )
+        ),
+        amp=amp_enabled,
         early_stopping_patience=(
             args.early_stopping_patience
             if args.early_stopping_patience is not None
@@ -141,11 +196,15 @@ def build_experiment_config(args: argparse.Namespace) -> ExperimentConfig:
         ),
         data_root=args.data_root,
         protocol_root=args.protocol_root,
+        feature_root=args.feature_root,
         output_root=args.output_root,
         seed=args.seed,
-        num_workers=args.num_workers,
+        num_workers=num_workers,
         device=args.device,
+        batch_size_explicit=args.batch_size is not None,
         resume=args.resume,
+        eval_2021=args.eval_2021,
+        eval_2021_labels=args.eval_2021_labels,
     )
 
 
@@ -204,7 +263,6 @@ def _resume_signature_payload(config: ExperimentConfig) -> Dict[str, object]:
         "step_size": config.step_size,
         "gamma": config.gamma,
         "lr": config.lr,
-        "batch_size": config.batch_size,
         "early_stopping_patience": config.early_stopping_patience,
         "seed": config.seed,
     }
@@ -212,15 +270,27 @@ def _resume_signature_payload(config: ExperimentConfig) -> Dict[str, object]:
 
 def _resume_signature_defaults(config: ExperimentConfig) -> Dict[str, object]:
     preset = PROFILE_PRESETS.get(config.profile or "", {})
+    combination_defaults = _combination_defaults(config.model, config.feature)
     return {
-        "normalize": preset.get("normalize", False),
-        "specaugment": preset.get("specaugment", False),
-        "amp": preset.get("amp", False),
+        "normalize": _resolve_training_option(
+            explicit_value=None,
+            preset=preset,
+            combination_defaults=combination_defaults,
+            key="normalize",
+            fallback=False,
+        ),
+        "specaugment": _resolve_training_option(
+            explicit_value=None,
+            preset=preset,
+            combination_defaults=combination_defaults,
+            key="specaugment",
+            fallback=False,
+        ),
+        "amp": _default_amp_enabled(config.device),
         "scheduler": preset.get("scheduler", "step"),
         "step_size": preset.get("step_size", 15),
         "gamma": preset.get("gamma", 0.5),
         "lr": preset.get("lr", 1e-3),
-        "batch_size": preset.get("batch_size", _default_batch_size(config.model)),
         "early_stopping_patience": preset.get("early_stopping_patience"),
         "seed": 42,
     }
@@ -303,7 +373,7 @@ def _copy_state_dict_to_cpu(state_dict: Mapping[str, Any] | None) -> Optional[Di
 
 
 def checkpoint_dir_for_config(config: ExperimentConfig) -> Path:
-    return Path(config.output_root) / "checkpoints" / f"{config.profile}_{config.model}_{config.feature}"
+    return experiment_output_paths(config.output_root, config.model, config.feature)["checkpoint_dir"]
 
 
 def checkpoint_paths_for_config(config: ExperimentConfig) -> Dict[str, Path]:
@@ -313,6 +383,55 @@ def checkpoint_paths_for_config(config: ExperimentConfig) -> Dict[str, Path]:
         "last": checkpoint_dir / "last.ckpt",
         "best": checkpoint_dir / "best.ckpt",
     }
+
+
+def _build_train_log_row(
+    config: ExperimentConfig,
+    *,
+    epoch: int,
+    train_loss: float,
+    val_loss: float,
+    val_accuracy: float,
+    val_eer: float,
+    lr: float,
+) -> Dict[str, object]:
+    return {
+        "profile": config.profile,
+        "model": config.model,
+        "feature": config.feature,
+        "epoch": epoch,
+        "train_loss": train_loss,
+        "val_loss": val_loss,
+        "val_accuracy": val_accuracy,
+        "val_eer": val_eer,
+        "lr": lr,
+    }
+
+
+def _build_train_log_rows(config: ExperimentConfig, history: Mapping[str, List[float]]) -> List[Dict[str, object]]:
+    rows = []
+    for epoch_index, (train_loss, val_loss, val_accuracy, val_eer, lr_value) in enumerate(
+        zip(
+            history["train_loss"],
+            history["val_loss"],
+            history["val_accuracy"],
+            history["val_eer"],
+            history["lr"],
+        ),
+        start=1,
+    ):
+        rows.append(
+            _build_train_log_row(
+                config,
+                epoch=epoch_index,
+                train_loss=train_loss,
+                val_loss=val_loss,
+                val_accuracy=val_accuracy,
+                val_eer=val_eer,
+                lr=lr_value,
+            )
+        )
+    return rows
 
 
 def _coerce_history(history: Optional[Dict[str, List[float]]]) -> Dict[str, List[float]]:
@@ -370,6 +489,39 @@ def _compare_signature(
     raise ValueError("\n".join(mismatch_details))
 
 
+def _normalize_checkpoint_signature(
+    checkpoint_signature: Mapping[str, Any],
+    defaults: Dict[str, object],
+    ignore_keys: set[str] | None = None,
+) -> Dict[str, object]:
+    raw_signature = checkpoint_signature.get("raw")
+    if not isinstance(raw_signature, Mapping):
+        return dict(checkpoint_signature)
+
+    normalized_raw = copy.deepcopy(dict(raw_signature))
+    for key in ignore_keys or set():
+        normalized_raw.pop(key, None)
+    model_name = normalized_raw.get("model_name")
+    if isinstance(model_name, str):
+        normalized_raw["model_name"] = canonicalize_model_name(model_name)
+    feature_name = normalized_raw.get("feature_name")
+    if isinstance(feature_name, str):
+        normalized_raw["feature_name"] = canonicalize_feature_name(feature_name)
+    return _build_signature(raw_payload=normalized_raw, defaults=defaults)
+
+
+def _profile_matches_config(profile_name: object, config: ExperimentConfig) -> bool:
+    if profile_name in (None, "", "custom"):
+        return True
+    preset = PROFILE_PRESETS.get(str(profile_name), {})
+    if not preset:
+        return False
+    return (
+        canonicalize_model_name(str(preset["model"])) == config.model
+        and canonicalize_feature_name(str(preset["feature"])) == config.feature
+    )
+
+
 def _validate_resume_checkpoint(
     *,
     checkpoint: Mapping[str, Any],
@@ -379,9 +531,10 @@ def _validate_resume_checkpoint(
 ) -> None:
     saved_profile = checkpoint.get("profile")
     if saved_profile != config.profile:
-        raise ValueError(
-            f"Resume checkpoint profile mismatch: saved='{saved_profile}' current='{config.profile}'"
-        )
+        if not (_profile_matches_config(saved_profile, config) and _profile_matches_config(config.profile, config)):
+            raise ValueError(
+                f"Resume checkpoint profile mismatch: saved='{saved_profile}' current='{config.profile}'"
+            )
 
     saved_epoch = int(checkpoint.get("epoch", 0))
     if config.epochs < saved_epoch:
@@ -396,13 +549,23 @@ def _validate_resume_checkpoint(
     if not isinstance(checkpoint_resume, Mapping):
         raise ValueError("Resume checkpoint is missing resume_signature metadata")
 
-    _compare_signature(
+    normalized_architecture = _normalize_checkpoint_signature(
         checkpoint_signature=checkpoint_architecture,
+        defaults=_architecture_signature_defaults(config),
+    )
+    normalized_resume = _normalize_checkpoint_signature(
+        checkpoint_signature=checkpoint_resume,
+        defaults=_resume_signature_defaults(config),
+        ignore_keys={"batch_size"},
+    )
+
+    _compare_signature(
+        checkpoint_signature=normalized_architecture,
         current_signature=architecture_signature,
         signature_name="architecture_signature",
     )
     _compare_signature(
-        checkpoint_signature=checkpoint_resume,
+        checkpoint_signature=normalized_resume,
         current_signature=resume_signature,
         signature_name="resume_signature",
     )
@@ -509,125 +672,12 @@ def _save_best_checkpoint(
     torch.save(payload, path)
 
 
-def _resolve_autocast(device: torch.device, enabled: bool):
-    if not enabled or device.type != "cuda":
-        return nullcontext()
-    if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
-        return torch.amp.autocast(device_type="cuda")
-    return autocast()
-
-
-def create_spoof_dataloader(
-    *,
-    feature_name: str,
-    split: str,
-    target_frames: int,
-    batch_size: int,
-    data_root: str,
-    protocol_root: str | None = None,
-    feature_root: str | None = None,
-    normalize: bool = False,
-    specaugment: bool = False,
-    training: bool = False,
-    num_workers: int = 0,
-    device: torch.device | None = None,
-    labels_path: str | None = None,
-) -> DataLoader:
-    if split == "eval_2021":
-        samples = build_2021_samples(
-            feature_name=feature_name,
-            labels_path=labels_path,
-            data_root=data_root,
-            feature_root=feature_root,
-        )
-    else:
-        samples = build_2019_samples(
-            feature_name=feature_name,
-            split=split,
-            data_root=data_root,
-            protocol_root=protocol_root,
-            feature_root=feature_root,
-        )
-
-    dataset = SpoofDataset(
-        samples=samples,
-        target_frames=target_frames,
-        training=training,
-        normalize=normalize,
-        apply_lfcc_specaugment=specaugment and training,
-        feature_name=feature_name,
-    )
-    active_device = device or resolve_device(None)
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=training,
-        num_workers=num_workers,
-        pin_memory=active_device.type == "cuda",
-    )
-
-
 def create_scheduler(config: ExperimentConfig, optimizer: torch.optim.Optimizer):
     if config.scheduler == "step":
         return StepLR(optimizer, step_size=config.step_size, gamma=config.gamma)
     if config.scheduler == "cosine":
         return CosineAnnealingLR(optimizer, T_max=config.epochs)
     raise ValueError(f"Unsupported scheduler: {config.scheduler}")
-
-
-def run_evaluation_loop(
-    model: nn.Module,
-    dataloader: DataLoader,
-    device: torch.device,
-    criterion: nn.Module | None = None,
-    use_amp: bool = False,
-) -> EvaluationArtifacts:
-    model.eval()
-    total_loss = 0.0
-    total_samples = 0
-    all_labels: List[int] = []
-    all_predictions: List[int] = []
-    all_scores: List[float] = []
-    all_utt_ids: List[str] = []
-
-    with torch.no_grad():
-        for inputs, labels, utt_ids in dataloader:
-            inputs = inputs.to(device)
-            labels = labels.to(device)
-
-            with _resolve_autocast(device=device, enabled=use_amp):
-                logits = model(inputs)
-                loss = criterion(logits, labels) if criterion is not None else None
-
-            probabilities = logits_to_spoof_scores(logits)
-            predictions = logits.argmax(dim=1).detach().cpu().numpy()
-            label_array = labels.detach().cpu().numpy()
-
-            if loss is not None:
-                total_loss += float(loss.item()) * labels.size(0)
-                total_samples += labels.size(0)
-
-            all_labels.extend(label_array.tolist())
-            all_predictions.extend(predictions.tolist())
-            all_scores.extend(probabilities.tolist())
-            all_utt_ids.extend(list(utt_ids))
-
-    accuracy = compute_accuracy(all_labels, all_predictions)
-    eer, threshold = compute_eer(all_labels, all_scores)
-    confusion = compute_confusion(all_labels, all_predictions)
-    average_loss = total_loss / total_samples if criterion is not None and total_samples else None
-
-    return EvaluationArtifacts(
-        loss=average_loss,
-        accuracy=accuracy,
-        eer=eer,
-        eer_threshold=threshold,
-        confusion=confusion,
-        labels=np.asarray(all_labels, dtype=np.int64),
-        predictions=np.asarray(all_predictions, dtype=np.int64),
-        scores=np.asarray(all_scores, dtype=np.float32),
-        utt_ids=all_utt_ids,
-    )
 
 
 def _is_better(current_eer: float, current_loss: float, best_eer: float, best_loss: float) -> bool:
@@ -640,51 +690,19 @@ def _is_better(current_eer: float, current_loss: float, best_eer: float, best_lo
     return False
 
 
-def upsert_rows(
-    csv_path: str | Path,
-    rows: List[Dict],
-    key_columns: List[str],
-    sort_columns: Optional[List[str]] = None,
-) -> pd.DataFrame:
-    path = Path(csv_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    new_frame = pd.DataFrame(rows)
-
-    if path.exists():
-        current_frame = pd.read_csv(path)
-    else:
-        current_frame = pd.DataFrame(columns=new_frame.columns)
-
-    if not current_frame.empty:
-        shared_keys = [column for column in key_columns if column in current_frame.columns and column in new_frame.columns]
-        if shared_keys:
-            current_keys = current_frame[shared_keys].astype(str).agg("||".join, axis=1)
-            new_keys = set(new_frame[shared_keys].astype(str).agg("||".join, axis=1))
-            current_frame = current_frame.loc[~current_keys.isin(new_keys)]
-
-    if current_frame.empty:
-        combined = new_frame.copy()
-    elif new_frame.empty:
-        combined = current_frame.copy()
-    else:
-        combined = pd.concat([current_frame, new_frame], ignore_index=True)
-    if sort_columns:
-        combined = combined.sort_values(sort_columns).reset_index(drop=True)
-    combined.to_csv(path, index=False)
-    return combined
-
-
-def load_checkpoint_bundle(checkpoint_path: str | Path, device: torch.device | str = "cpu"):
-    bundle = torch.load(checkpoint_path, map_location=device)
-    model = build_model(bundle["model_name"])
-    model.load_state_dict(bundle["state_dict"])
-    return model, bundle
-
-
 def create_grad_scaler(use_amp: bool):
     if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
         return torch.amp.GradScaler("cuda", enabled=use_amp)
     return GradScaler(enabled=use_amp)
+
+
+def _resume_should_restart_from_scratch(config: ExperimentConfig, checkpoint: Mapping[str, Any]) -> bool:
+    # Older LCNN+MFCC checkpoints were commonly trained without input normalization,
+    # which can blow up logits under AMP on later epochs. Re-running from scratch with
+    # normalized MFCC inputs is more reliable than resuming the unstable state.
+    if config.model != "lcnn" or config.feature != "mfcc" or not config.normalize:
+        return False
+    return not bool(checkpoint.get("normalize", False))
 
 
 def train_one_epoch(
@@ -702,22 +720,37 @@ def train_one_epoch(
     total_loss = 0.0
     total_samples = 0
     progress = tqdm(dataloader, desc=f"Epoch {epoch}/{epochs}", leave=False)
+    transfer_non_blocking = device.type == "cuda"
 
-    for inputs, labels, _ in progress:
-        inputs = inputs.to(device)
-        labels = labels.to(device)
+    for batch_index, (inputs, labels, utt_ids) in enumerate(progress):
+        inputs = inputs.to(device, non_blocking=transfer_non_blocking)
+        labels = labels.to(device, non_blocking=transfer_non_blocking)
         optimizer.zero_grad(set_to_none=True)
 
-        with _resolve_autocast(device=device, enabled=use_amp):
+        with torch.amp.autocast("cuda", enabled=use_amp) if hasattr(torch, "amp") else torch.cuda.amp.autocast(enabled=use_amp):
             logits = model(inputs)
             loss = criterion(logits, labels)
 
+        if not torch.isfinite(logits).all():
+            raise RuntimeError(
+                "Non-finite logits detected during training "
+                f"(epoch={epoch}/{epochs}, batch_index={batch_index}, utt_ids={list(utt_ids)[:5]})."
+            )
+        if not torch.isfinite(loss):
+            raise RuntimeError(
+                "Non-finite loss detected during training "
+                f"(epoch={epoch}/{epochs}, batch_index={batch_index}, utt_ids={list(utt_ids)[:5]})."
+            )
+
         if use_amp and device.type == "cuda":
             scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=MAX_GRAD_NORM)
             scaler.step(optimizer)
             scaler.update()
         else:
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=MAX_GRAD_NORM)
             optimizer.step()
 
         batch_size = labels.size(0)
@@ -731,10 +764,26 @@ def train_one_epoch(
 def train_experiment(config: ExperimentConfig) -> Dict[str, object]:
     set_seed(config.seed)
     device = resolve_device(config.device)
+    configure_torch_runtime(device)
     use_amp = config.amp and device.type == "cuda"
     checkpoint_paths = checkpoint_paths_for_config(config)
+    output_paths = experiment_output_paths(config.output_root, config.model, config.feature)
     architecture_signature = build_architecture_signature(config)
     resume_signature = build_resume_signature(config)
+    resume_bundle: Mapping[str, Any] | None = None
+    should_resume = config.resume
+
+    if should_resume and checkpoint_paths["last"].exists():
+        resume_bundle = torch.load(checkpoint_paths["last"], map_location="cpu")
+        if "model_name" in resume_bundle:
+            resume_bundle["model_name"] = canonicalize_model_name(str(resume_bundle["model_name"]))
+        if _resume_should_restart_from_scratch(config, resume_bundle):
+            print(
+                "Warning: last.ckpt for lcnn + mfcc was created without normalize=True. "
+                "Starting fresh training to avoid NaN instability."
+            )
+            resume_bundle = None
+            should_resume = False
 
     train_loader = create_spoof_dataloader(
         feature_name=config.feature,
@@ -743,6 +792,7 @@ def train_experiment(config: ExperimentConfig) -> Dict[str, object]:
         batch_size=config.batch_size,
         data_root=config.data_root,
         protocol_root=config.protocol_root,
+        feature_root=config.feature_root,
         normalize=config.normalize,
         specaugment=config.specaugment,
         training=True,
@@ -756,6 +806,7 @@ def train_experiment(config: ExperimentConfig) -> Dict[str, object]:
         batch_size=config.batch_size,
         data_root=config.data_root,
         protocol_root=config.protocol_root,
+        feature_root=config.feature_root,
         normalize=config.normalize,
         specaugment=False,
         training=False,
@@ -775,9 +826,8 @@ def train_experiment(config: ExperimentConfig) -> Dict[str, object]:
     patience_counter = 0
     start_epoch = 1
 
-    if config.resume:
-        if checkpoint_paths["last"].exists():
-            resume_bundle = torch.load(checkpoint_paths["last"], map_location="cpu")
+    if should_resume:
+        if resume_bundle is not None:
             _validate_resume_checkpoint(
                 checkpoint=resume_bundle,
                 config=config,
@@ -827,12 +877,31 @@ def train_experiment(config: ExperimentConfig) -> Dict[str, object]:
             use_amp=use_amp,
         )
 
+        val_loss = float(val_metrics.loss if val_metrics.loss is not None else float("nan"))
         current_lr = float(optimizer.param_groups[0]["lr"])
         history["train_loss"].append(train_loss)
-        history["val_loss"].append(float(val_metrics.loss if val_metrics.loss is not None else float("nan")))
+        history["val_loss"].append(val_loss)
         history["val_accuracy"].append(val_metrics.accuracy)
         history["val_eer"].append(val_metrics.eer)
         history["lr"].append(current_lr)
+
+        current_log_row = _build_train_log_row(
+            config,
+            epoch=epoch,
+            train_loss=train_loss,
+            val_loss=val_loss,
+            val_accuracy=float(val_metrics.accuracy),
+            val_eer=float(val_metrics.eer),
+            lr=current_lr,
+        )
+        # Ghi log ngay sau mỗi epoch để không phải chờ tới cuối quá trình train.
+        # Cách này giữ lại các epoch đã xong nếu train bị dừng giữa chừng.
+        upsert_rows(
+            csv_path=output_paths["result_dir"] / "train_log.csv",
+            rows=[current_log_row],
+            key_columns=["epoch"],
+            sort_columns=["epoch"],
+        )
 
         improved = _is_better(
             current_eer=val_metrics.eer,
@@ -881,7 +950,6 @@ def train_experiment(config: ExperimentConfig) -> Dict[str, object]:
         if config.early_stopping_patience is not None and patience_counter >= config.early_stopping_patience:
             break
 
-    output_root = Path(config.output_root)
     if best_state is None and checkpoint_paths["best"].exists():
         best_bundle = torch.load(checkpoint_paths["best"], map_location="cpu")
         best_state = _copy_state_dict_to_cpu(best_bundle.get("state_dict"))
@@ -925,39 +993,16 @@ def train_experiment(config: ExperimentConfig) -> Dict[str, object]:
     save_learning_curve(
         train_losses=history["train_loss"],
         val_losses=history["val_loss"],
-        output_path=output_root / "figures" / f"{config.profile}_learning_curve.png",
-        title=f"{config.profile.title()} ({config.model.upper()} + {config.feature.upper()})",
+        output_path=output_paths["figure_dir"] / "learning_curve.png",
+        title=f"{config.model.upper()} + {config.feature.upper()}",
     )
 
-    log_rows = []
-    for epoch_index, (train_loss, val_loss, val_accuracy, val_eer, lr_value) in enumerate(
-        zip(
-            history["train_loss"],
-            history["val_loss"],
-            history["val_accuracy"],
-            history["val_eer"],
-            history["lr"],
-        ),
-        start=1,
-    ):
-        log_rows.append(
-            {
-                "profile": config.profile,
-                "model": config.model,
-                "feature": config.feature,
-                "epoch": epoch_index,
-                "train_loss": train_loss,
-                "val_loss": val_loss,
-                "val_accuracy": val_accuracy,
-                "val_eer": val_eer,
-                "lr": lr_value,
-            }
-        )
+    log_rows = _build_train_log_rows(config=config, history=history)
     upsert_rows(
-        csv_path=output_root / "results" / "train_log.csv",
+        csv_path=output_paths["result_dir"] / "train_log.csv",
         rows=log_rows,
-        key_columns=["profile", "model", "feature", "epoch"],
-        sort_columns=["profile", "model", "feature", "epoch"],
+        key_columns=["epoch"],
+        sort_columns=["epoch"],
     )
 
     return {
@@ -972,7 +1017,7 @@ def train_experiment(config: ExperimentConfig) -> Dict[str, object]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train voice spoofing detection models.")
     parser.add_argument("--profile", choices=["baseline", "optimized"], default=None)
-    parser.add_argument("--model", choices=["cnn", "resnet", "lcnn"], default=None)
+    parser.add_argument("--model", choices=["cnn", "lcnn", "resnet18", "resnet"], default=None)
     parser.add_argument("--feature", choices=["mfcc", "lfcc", "spectrogram"], default=None)
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch_size", type=int, default=None)
@@ -984,11 +1029,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--early_stopping_patience", type=int, default=None)
     parser.add_argument("--data_root", default="data")
     parser.add_argument("--protocol_root", default=None)
+    parser.add_argument("--feature_root", default=None)
     parser.add_argument("--output_root", default="outputs")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--num_workers", type=int, default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--eval_2021", action="store_true")
+    parser.add_argument("--eval_2021_labels", default=None)
 
     parser.add_argument("--normalize", dest="normalize", action="store_true")
     parser.add_argument("--no_normalize", dest="normalize", action="store_false")
@@ -1015,6 +1063,30 @@ def main() -> None:
         f"best_dev_eer={best_metrics['val_eer']:.4f} | "
         f"best_dev_accuracy={best_metrics['val_accuracy']:.4f}"
     )
+
+    if config.eval_2021:
+        from evaluate import evaluate_checkpoint
+
+        evaluation_result = evaluate_checkpoint(
+            checkpoint_path=result["checkpoint_path"],
+            data_root=config.data_root,
+            protocol_root=config.protocol_root,
+            feature_root=config.feature_root,
+            output_root=config.output_root,
+            batch_size=None,
+            num_workers=config.num_workers,
+            device=config.device,
+            run_2019=True,
+            run_2021=True,
+            eval_2021_labels=config.eval_2021_labels,
+        )
+        result_2021 = evaluation_result.get("result_2021")
+        if result_2021 is not None:
+            print(
+                f"Post-train evaluation complete | "
+                f"eer_2019={result_2021['eer_2019']:.4f} | "
+                f"eer_2021={result_2021['eer_2021']:.4f}"
+            )
 
 
 if __name__ == "__main__":

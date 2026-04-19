@@ -1,0 +1,22 @@
+{
+  "generated_at": "2026-04-18T18:34:45.945043+00:00",
+  "model": "resnet18",
+  "feature": "spectrogram",
+  "checkpoint": "outputs/checkpoints/resnet18_spectrogram/best.ckpt",
+  "best_epoch": 43,
+  "metrics_2019": {
+    "eer": 0.15605504676780105,
+    "accuracy": 0.6318345803444839,
+    "num_samples": 71237
+  },
+  "metrics_2021": {
+    "eer": 0.47487917283812886,
+    "accuracy": 0.7739719979199576,
+    "num_samples": 101921
+  },
+  "config": {
+    "batch_size": 64,
+    "num_workers": 0,
+    "device": "cuda"
+  }
+}

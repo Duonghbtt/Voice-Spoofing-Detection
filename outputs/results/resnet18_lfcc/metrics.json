@@ -1,0 +1,22 @@
+{
+  "generated_at": "2026-04-17T17:54:04.414186+00:00",
+  "model": "resnet18",
+  "feature": "lfcc",
+  "checkpoint": "outputs/checkpoints/resnet18_lfcc/best.ckpt",
+  "best_epoch": 36,
+  "metrics_2019": {
+    "eer": 0.1561835169794172,
+    "accuracy": 0.7353482038828137,
+    "num_samples": 71237
+  },
+  "metrics_2021": {
+    "eer": 0.4651545579741997,
+    "accuracy": 0.8021801198967828,
+    "num_samples": 101921
+  },
+  "config": {
+    "batch_size": 128,
+    "num_workers": 0,
+    "device": "cuda"
+  }
+}

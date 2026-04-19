@@ -1,0 +1,22 @@
+{
+  "generated_at": "2026-04-15T10:25:14.351169+00:00",
+  "model": "cnn",
+  "feature": "mfcc",
+  "checkpoint": "outputs/checkpoints/cnn_mfcc/best.ckpt",
+  "best_epoch": 1,
+  "metrics_2019": {
+    "eer": 0.358092618760401,
+    "accuracy": 0.8967530917921867,
+    "num_samples": 71237
+  },
+  "metrics_2021": {
+    "eer": 0.4834517842262033,
+    "accuracy": 0.8976560277077344,
+    "num_samples": 101921
+  },
+  "config": {
+    "batch_size": 128,
+    "num_workers": 0,
+    "device": "cuda"
+  }
+}

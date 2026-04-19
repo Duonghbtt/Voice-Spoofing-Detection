@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import logging
 import random
 import zipfile
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ import torch
 from torch.utils.data import Dataset
 
 
+LOGGER = logging.getLogger(__name__)
 LABEL_MAP = {
     "bonafide": 0,
     "spoof": 1,
@@ -20,24 +22,48 @@ LABEL_MAP = {
     0: 0,
     1: 1,
 }
-
 PROTOCOL_FILES = {
     "train": "ASVspoof2019.LA.cm.train.trn.txt",
     "dev": "ASVspoof2019.LA.cm.dev.trl.txt",
     "eval": "ASVspoof2019.LA.cm.eval.trl.txt",
 }
-EXTERNAL_2021_LABELS_FILE = "labels_eval_2021.csv"
-CANONICAL_2019_BUNDLE = "output_npy_2019"
-CANONICAL_2021_BUNDLE = "output_npy_2021"
-CANONICAL_FEATURE_DIRS = {
-    "mfcc": "output_mfcc",
-    "output_mfcc": "output_mfcc",
-    "lfcc": "output_lfcc",
-    "output_lfcc": "output_lfcc",
-    "spectrogram": "output_spectrogram",
-    "spec": "output_spectrogram",
-    "output_spec": "output_spectrogram",
-    "output_spectrogram": "output_spectrogram",
+SUPPORTED_SPLITS = ("train", "dev", "eval", "eval_2021")
+FEATURE_LAYOUTS = {
+    "mfcc": {
+        "train": {"bundle": "output_npy_2019", "feature_dir": "output_mfcc", "split_dir": "train", "labels_file": "labels_train.csv"},
+        "dev": {"bundle": "output_npy_2019", "feature_dir": "output_mfcc", "split_dir": "dev", "labels_file": "labels_dev.csv"},
+        "eval": {"bundle": "output_npy_2019", "feature_dir": "output_mfcc", "split_dir": "eval", "labels_file": "labels_eval.csv"},
+        "eval_2021": {"bundle": "output_npy_2021", "feature_dir": "output_mfcc", "split_dir": "eval_2021", "labels_file": "labels_eval_2021.csv"},
+    },
+    "lfcc": {
+        "train": {"bundle": "output_npy_2019", "feature_dir": "output_lfcc", "split_dir": "train", "labels_file": "labels_train.csv"},
+        "dev": {"bundle": "output_npy_2019", "feature_dir": "output_lfcc", "split_dir": "dev", "labels_file": "labels_dev.csv"},
+        "eval": {"bundle": "output_npy_2019", "feature_dir": "output_lfcc", "split_dir": "eval", "labels_file": "labels_eval.csv"},
+        "eval_2021": {"bundle": "output_npy_2021", "feature_dir": "output_lfcc", "split_dir": "eval_2021", "labels_file": "labels_eval_2021.csv"},
+    },
+    "spectrogram": {
+        "train": {"bundle": "output_spectrogram_2019", "feature_dir": None, "split_dir": "train", "labels_file": "labels_train.csv"},
+        "dev": {"bundle": "output_spectrogram_2019", "feature_dir": None, "split_dir": "dev", "labels_file": "labels_dev.csv"},
+        "eval": {"bundle": "output_spectrogram_2019", "feature_dir": None, "split_dir": "eval", "labels_file": "labels_eval.csv"},
+        "eval_2021": {"bundle": "output_spectrogram_2021", "feature_dir": None, "split_dir": "eval", "labels_file": "labels_eval_2021.csv"},
+    },
+}
+FEATURE_NAME_ALIASES = {
+    "mfcc": "mfcc",
+    "output_mfcc": "mfcc",
+    "lfcc": "lfcc",
+    "output_lfcc": "lfcc",
+    "spectrogram": "spectrogram",
+    "spec": "spectrogram",
+    "output_spec": "spectrogram",
+    "output_spectrogram": "spectrogram",
+}
+INVALID_DATA_ROOT_NAMES = {
+    "features",
+    "output_npy_2019",
+    "output_npy_2021",
+    "output_spectrogram_2019",
+    "output_spectrogram_2021",
 }
 
 
@@ -57,38 +83,71 @@ def canonicalize_label(label: object) -> int:
     return LABEL_MAP[label]
 
 
+def canonicalize_feature_name(feature_name: str) -> str:
+    normalized = feature_name.strip().lower()
+    if normalized not in FEATURE_NAME_ALIASES:
+        raise ValueError(f"Unsupported feature name: {feature_name}")
+    return FEATURE_NAME_ALIASES[normalized]
+
+
 def resolve_data_root(data_root: str | Path) -> Path:
     root = Path(data_root)
     trailing_parts = [part.lower() for part in root.parts[-4:]]
-    if root.name.lower() == "features" or any(
-        part in {CANONICAL_2019_BUNDLE, CANONICAL_2021_BUNDLE} for part in trailing_parts
-    ):
+    if root.name.lower() in INVALID_DATA_ROOT_NAMES or any(part in INVALID_DATA_ROOT_NAMES for part in trailing_parts):
         raise ValueError(
             f"--data_root must point to the parent data directory (for example 'data'), not '{root}'."
         )
     return root
 
 
-def _canonical_feature_directory_name(feature_name: str) -> str:
-    normalized = feature_name.strip().lower()
-    if normalized in CANONICAL_FEATURE_DIRS:
-        return CANONICAL_FEATURE_DIRS[normalized]
-    if normalized.startswith("output_"):
-        return normalized
-    return f"output_{normalized}"
+def _resolve_feature_layout(feature_name: str, split: str) -> Dict[str, str | None]:
+    canonical_feature = canonicalize_feature_name(feature_name)
+    if split not in SUPPORTED_SPLITS:
+        raise ValueError(f"Unsupported split '{split}'. Expected one of: {', '.join(SUPPORTED_SPLITS)}")
+    return FEATURE_LAYOUTS[canonical_feature][split]
 
 
-def _expected_feature_directory(data_root: Path, feature_name: str, split: str) -> Path:
-    feature_dir = _canonical_feature_directory_name(feature_name)
-    if split == "eval_2021":
-        return data_root / "features" / CANONICAL_2021_BUNDLE / feature_dir / "eval_2021"
-    if split in PROTOCOL_FILES:
-        return data_root / "features" / CANONICAL_2019_BUNDLE / feature_dir / split
-    raise ValueError(f"Unsupported split '{split}'. Expected one of: train, dev, eval, eval_2021")
+def _is_explicit_split_directory(path: Path, split_dir_name: str) -> bool:
+    if not path.exists() or not path.is_dir():
+        return False
+    if path.name.lower() == split_dir_name.lower():
+        return True
+    return any(path.glob("*.npy"))
 
 
-def _expected_external_labels_path(data_root: Path) -> Path:
-    return data_root / "features" / CANONICAL_2021_BUNDLE / EXTERNAL_2021_LABELS_FILE
+def _candidate_feature_directories(root: Path, layout: Dict[str, str | None]) -> List[Path]:
+    bundle_name = str(layout["bundle"])
+    feature_dir_name = layout["feature_dir"]
+    split_dir_name = str(layout["split_dir"])
+    candidates: List[Path] = []
+
+    def add(path: Path) -> None:
+        if path not in candidates:
+            candidates.append(path)
+
+    add(root)
+    add(root / split_dir_name)
+
+    if feature_dir_name is not None:
+        add(root / feature_dir_name)
+        add(root / feature_dir_name / split_dir_name)
+
+    add(root / bundle_name)
+    add(root / bundle_name / split_dir_name)
+
+    if feature_dir_name is not None:
+        add(root / bundle_name / feature_dir_name)
+        add(root / bundle_name / feature_dir_name / split_dir_name)
+
+    add(root / "features")
+    add(root / "features" / bundle_name)
+    add(root / "features" / bundle_name / split_dir_name)
+
+    if feature_dir_name is not None:
+        add(root / "features" / bundle_name / feature_dir_name)
+        add(root / "features" / bundle_name / feature_dir_name / split_dir_name)
+
+    return candidates
 
 
 def resolve_feature_directory(
@@ -97,23 +156,58 @@ def resolve_feature_directory(
     data_root: str | Path = "data",
     feature_root: str | Path | None = None,
 ) -> Path:
-    if feature_root is not None:
-        root = Path(feature_root)
-        split_dir = root / split
-        if split_dir.exists() and split_dir.is_dir():
-            return split_dir
-        if root.exists() and root.is_dir() and any(root.glob("*.npy")):
-            return root
-        raise FileNotFoundError(f"Could not resolve feature directory from explicit root: {root}")
+    layout = _resolve_feature_layout(feature_name=feature_name, split=split)
 
-    resolved_data_root = resolve_data_root(data_root)
-    feature_dir = _expected_feature_directory(resolved_data_root, feature_name, split)
-    if not feature_dir.exists() or not feature_dir.is_dir():
+    if feature_root is None:
+        base_root = resolve_data_root(data_root) / "features"
+        feature_dir = base_root / str(layout["bundle"])
+        if layout["feature_dir"] is not None:
+            feature_dir = feature_dir / str(layout["feature_dir"])
+        feature_dir = feature_dir / str(layout["split_dir"])
+        if feature_dir.exists() and feature_dir.is_dir():
+            return feature_dir
         raise FileNotFoundError(
-            f"Could not locate feature directory for feature='{feature_name}', split='{split}' at '{feature_dir}'. "
-            "Use --data_root as the parent data directory, for example 'data'."
+            f"Could not locate feature directory for feature='{feature_name}', split='{split}' at '{feature_dir}'."
         )
-    return feature_dir
+
+    explicit_root = Path(feature_root)
+    for candidate in _candidate_feature_directories(explicit_root, layout):
+        if _is_explicit_split_directory(candidate, str(layout["split_dir"])):
+            return candidate
+
+    raise FileNotFoundError(
+        f"Could not resolve feature directory for feature='{feature_name}', split='{split}' from explicit root '{explicit_root}'."
+    )
+
+
+def resolve_labels_csv_path(
+    feature_name: str,
+    split: str,
+    *,
+    labels_path: str | Path | None = None,
+    data_root: str | Path = "data",
+    feature_root: str | Path | None = None,
+) -> Path | None:
+    resolved_labels_path, explicit_path, expected_path = _discover_labels_csv_path(
+        feature_name=feature_name,
+        split=split,
+        labels_path=labels_path,
+        data_root=data_root,
+        feature_root=feature_root,
+    )
+
+    if labels_path is not None and explicit_path is not None and resolved_labels_path != explicit_path:
+        LOGGER.warning("Khong tim thay file nhan CSV duoc chi dinh: %s. Se thu tu dong resolve.", explicit_path)
+    if resolved_labels_path is not None:
+        return resolved_labels_path
+
+    LOGGER.warning(
+        "Khong tim thay file nhan CSV cho feature='%s', split='%s' tai '%s'.",
+        canonicalize_feature_name(feature_name),
+        split,
+        expected_path,
+    )
+    return None
 
 
 def _protocol_search_roots(data_root: Path, protocol_root: str | Path | None) -> List[Path]:
@@ -202,46 +296,40 @@ def load_protocol_labels(
     )
 
 
-def resolve_external_labels_path(
-    labels_path: str | Path | None = None,
+def _discover_labels_csv_path(
+    feature_name: str,
+    split: str,
     *,
+    labels_path: str | Path | None = None,
     data_root: str | Path = "data",
     feature_root: str | Path | None = None,
-) -> Path:
-    if labels_path is not None:
-        candidate = Path(labels_path)
-        if candidate.exists() and candidate.is_file():
-            return candidate
-        raise FileNotFoundError(f"Could not locate ASVspoof2021 labels file: {candidate}")
+    feature_dir: Path | None = None,
+) -> tuple[Path | None, Path | None, Path]:
+    explicit_path = Path(labels_path) if labels_path is not None else None
+    if explicit_path is not None and explicit_path.exists() and explicit_path.is_file():
+        return explicit_path, explicit_path, explicit_path
 
-    _ = feature_root
-    resolved_data_root = resolve_data_root(data_root)
-    candidate = _expected_external_labels_path(resolved_data_root)
-    if candidate.exists() and candidate.is_file():
-        return candidate
-
-    raise FileNotFoundError(
-        f"Could not locate ASVspoof2021 labels file at '{candidate}'. "
-        "Provide --eval_2021_labels explicitly or place the file at that canonical path."
-    )
-
-
-def load_external_labels(
-    labels_path: str | Path | None = None,
-    *,
-    data_root: str | Path = "data",
-    feature_root: str | Path | None = None,
-) -> Dict[str, int]:
-    labels: Dict[str, int] = {}
-    resolved_labels_path = resolve_external_labels_path(
-        labels_path=labels_path,
+    resolved_feature_dir = feature_dir or resolve_feature_directory(
+        feature_name=feature_name,
+        split=split,
         data_root=data_root,
         feature_root=feature_root,
     )
-    with resolved_labels_path.open("r", encoding="utf-8", newline="") as handle:
+    expected_path = resolved_feature_dir.parent / str(_resolve_feature_layout(feature_name=feature_name, split=split)["labels_file"])
+    if expected_path.exists() and expected_path.is_file():
+        return expected_path, explicit_path, expected_path
+    return None, explicit_path, expected_path
+
+
+def _load_labels_from_csv_file(labels_path: Path, *, warn: bool = True) -> Dict[str, int]:
+    labels: Dict[str, int] = {}
+    with labels_path.open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         if not reader.fieldnames:
-            raise ValueError("2021 labels file must contain a header row")
+            if warn:
+                LOGGER.warning("File nhan CSV '%s' khong co header hop le.", labels_path)
+            return labels
+
         normalized_fieldnames = {field.strip().lower(): field for field in reader.fieldnames}
         utt_field = next(
             (
@@ -253,22 +341,151 @@ def load_external_labels(
         )
         label_field = normalized_fieldnames.get("label")
         if utt_field is None or label_field is None:
-            raise ValueError("2021 labels file must contain columns like utt_id/filename and label")
+            if warn:
+                LOGGER.warning("File nhan CSV '%s' thieu cot utt_id/filename hoac label.", labels_path)
+            return labels
+
         for row in reader:
-            utt_id = Path(row[utt_field].strip()).stem
-            labels[utt_id] = canonicalize_label(row[label_field])
+            utt_raw = str(row.get(utt_field, "")).strip()
+            label_raw = row.get(label_field)
+            if not utt_raw:
+                continue
+            if label_raw is None or str(label_raw).strip() == "":
+                continue
+            labels[Path(utt_raw).stem] = canonicalize_label(label_raw)
     return labels
+
+
+def load_feature_csv_labels(
+    feature_name: str,
+    split: str,
+    *,
+    labels_path: str | Path | None = None,
+    data_root: str | Path = "data",
+    feature_root: str | Path | None = None,
+) -> Dict[str, int]:
+    resolved_labels_path = resolve_labels_csv_path(
+        feature_name=feature_name,
+        split=split,
+        labels_path=labels_path,
+        data_root=data_root,
+        feature_root=feature_root,
+    )
+    if resolved_labels_path is None:
+        return {}
+    return _load_labels_from_csv_file(resolved_labels_path)
+
+
+def _resolve_2019_labels(
+    *,
+    feature_name: str,
+    split: str,
+    feature_dir: Path,
+    data_root: str | Path = "data",
+    protocol_root: str | Path | None = None,
+    feature_root: str | Path | None = None,
+) -> Dict[str, int]:
+    feature_ids = {feature_path.stem for feature_path in feature_dir.glob("*.npy")}
+    csv_path, _, _ = _discover_labels_csv_path(
+        feature_name=feature_name,
+        split=split,
+        data_root=data_root,
+        feature_root=feature_root,
+        feature_dir=feature_dir,
+    )
+    csv_issue = f"Khong tim thay labels CSV hop le cho split='{split}'."
+
+    if csv_path is not None:
+        try:
+            csv_labels = _load_labels_from_csv_file(csv_path, warn=False)
+            if not csv_labels:
+                raise ValueError(f"File nhan CSV '{csv_path}' khong co ban ghi hop le.")
+            matched_ids = feature_ids.intersection(csv_labels)
+            if not matched_ids:
+                raise ValueError(f"File nhan CSV '{csv_path}' khong khop utt_id voi feature trong '{feature_dir}'.")
+            return csv_labels
+        except Exception as error:
+            csv_issue = str(error)
+
+    try:
+        protocol_labels = load_protocol_labels(split=split, data_root=data_root, protocol_root=protocol_root)
+        # CSV khong dung duoc thi moi fallback sang protocol.
+        LOGGER.warning(
+            "CSV khong hop le, fallback sang protocol cho split='%s'. Chi tiet: %s",
+            split,
+            csv_issue,
+        )
+        return protocol_labels
+    except FileNotFoundError as error:
+        raise RuntimeError(f"Khong co nguon nhan hop le cho split='{split}'.") from error
+
+
+def resolve_external_labels_path(
+    labels_path: str | Path | None = None,
+    *,
+    feature_name: str = "mfcc",
+    data_root: str | Path = "data",
+    feature_root: str | Path | None = None,
+) -> Path | None:
+    return resolve_labels_csv_path(
+        feature_name=feature_name,
+        split="eval_2021",
+        labels_path=labels_path,
+        data_root=data_root,
+        feature_root=feature_root,
+    )
+
+
+def load_external_labels(
+    labels_path: str | Path | None = None,
+    *,
+    feature_name: str = "mfcc",
+    data_root: str | Path = "data",
+    feature_root: str | Path | None = None,
+) -> Dict[str, int]:
+    return load_feature_csv_labels(
+        feature_name=feature_name,
+        split="eval_2021",
+        labels_path=labels_path,
+        data_root=data_root,
+        feature_root=feature_root,
+    )
+
+
+def _preview_ids(values: Sequence[str], max_items: int = 5) -> str:
+    return ", ".join(list(values)[:max_items])
 
 
 def _records_from_directory(feature_dir: Path, labels: Dict[str, int]) -> List[SampleRecord]:
     samples: List[SampleRecord] = []
+    missing_label_ids: List[str] = []
+    feature_ids: List[str] = []
+
     for feature_path in sorted(feature_dir.glob("*.npy")):
         utt_id = feature_path.stem
+        feature_ids.append(utt_id)
         if utt_id not in labels:
+            missing_label_ids.append(utt_id)
             continue
         samples.append(SampleRecord(utt_id=utt_id, path=feature_path, label=labels[utt_id]))
+
+    extra_label_ids = sorted(set(labels) - set(feature_ids))
+    if missing_label_ids:
+        LOGGER.warning(
+            "Bo qua %d file .npy trong '%s' vi khong tim thay nhan. Vi du: %s",
+            len(missing_label_ids),
+            feature_dir,
+            _preview_ids(missing_label_ids),
+        )
+    if extra_label_ids:
+        LOGGER.warning(
+            "Co %d utt_id trong file nhan nhung khong co file .npy trong '%s'. Vi du: %s",
+            len(extra_label_ids),
+            feature_dir,
+            _preview_ids(extra_label_ids),
+        )
     if not samples:
-        raise RuntimeError(f"No labeled .npy samples found in {feature_dir}")
+        raise RuntimeError(f"Khong co sample co nhan hop le trong {feature_dir}")
     return samples
 
 
@@ -282,11 +499,18 @@ def build_2019_samples(
     if split not in PROTOCOL_FILES:
         raise ValueError(f"Unsupported ASVspoof2019 split: {split}")
 
-    labels = load_protocol_labels(split=split, data_root=data_root, protocol_root=protocol_root)
     feature_dir = resolve_feature_directory(
         feature_name=feature_name,
         split=split,
         data_root=data_root,
+        feature_root=feature_root,
+    )
+    labels = _resolve_2019_labels(
+        feature_name=feature_name,
+        split=split,
+        feature_dir=feature_dir,
+        data_root=data_root,
+        protocol_root=protocol_root,
         feature_root=feature_root,
     )
     return _records_from_directory(feature_dir=feature_dir, labels=labels)
@@ -298,7 +522,12 @@ def build_2021_samples(
     data_root: str | Path = "data",
     feature_root: str | Path | None = None,
 ) -> List[SampleRecord]:
-    labels = load_external_labels(labels_path, data_root=data_root, feature_root=feature_root)
+    labels = load_external_labels(
+        labels_path,
+        feature_name=feature_name,
+        data_root=data_root,
+        feature_root=feature_root,
+    )
     feature_dir = resolve_feature_directory(
         feature_name=feature_name,
         split="eval_2021",
@@ -384,7 +613,7 @@ class SpoofDataset(Dataset):
         self.training = training
         self.normalize = normalize
         self.apply_lfcc_specaugment = apply_lfcc_specaugment
-        self.feature_name = feature_name
+        self.feature_name = canonicalize_feature_name(feature_name)
 
     def __len__(self) -> int:
         return len(self.samples)

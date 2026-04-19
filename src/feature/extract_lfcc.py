@@ -115,7 +115,7 @@ def run_2021():
                     labels_list.append([file_name, label_dict[file_name]])
                     
     pd.DataFrame(labels_list, columns=['filename', 'label']).to_csv(
-        os.path.join(OUTPUT_ROOT, 'output_npy_2021', 'labels_eval_2021.csv'),
+        os.path.join(OUTPUT_2021_DIR, 'labels_eval_2021.csv'),
         index=False,
     )
     print("Hoan thanh LFCC 2021 eval")

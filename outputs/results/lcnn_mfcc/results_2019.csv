@@ -1,0 +1,2 @@
+profile,model,feature,accuracy,eer,num_samples,checkpoint
+custom,lcnn,mfcc,0.8951668374580625,0.12983838680643575,71237,D:\Document\Four-year\Second semeter\Học sâu\BTL\Voice-Spoofing-Detection\outputs\checkpoints\lcnn_mfcc\best.ckpt

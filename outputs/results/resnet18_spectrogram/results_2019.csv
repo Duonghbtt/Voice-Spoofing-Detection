@@ -1,0 +1,2 @@
+profile,model,feature,accuracy,eer,num_samples,checkpoint
+custom,resnet18,spectrogram,0.6318345803444839,0.15605504676780105,71237,D:\Document\Four-year\Second semeter\Học sâu\BTL\Voice-Spoofing-Detection\outputs\checkpoints\resnet18_spectrogram\best.ckpt

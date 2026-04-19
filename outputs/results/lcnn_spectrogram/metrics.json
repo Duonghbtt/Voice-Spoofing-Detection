@@ -1,0 +1,22 @@
+{
+  "generated_at": "2026-04-16T09:36:03.662788+00:00",
+  "model": "lcnn",
+  "feature": "spectrogram",
+  "checkpoint": "outputs/checkpoints/lcnn_spectrogram/best.ckpt",
+  "best_epoch": 46,
+  "metrics_2019": {
+    "eer": 0.1679807748442377,
+    "accuracy": 0.6431770007159201,
+    "num_samples": 71237
+  },
+  "metrics_2021": {
+    "eer": 0.44867277818638807,
+    "accuracy": 0.8009438682901463,
+    "num_samples": 101921
+  },
+  "config": {
+    "batch_size": 64,
+    "num_workers": 0,
+    "device": "cuda"
+  }
+}

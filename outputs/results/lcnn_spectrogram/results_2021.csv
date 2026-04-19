@@ -1,0 +1,2 @@
+profile,model,feature,eer_2021,accuracy,num_samples,eer_2019,generalization_gap,checkpoint
+custom,lcnn,spectrogram,0.44867277818638807,0.8009438682901463,101921,0.1679807748442377,0.2806920033421504,D:\Document\Four-year\Second semeter\Học sâu\BTL\Voice-Spoofing-Detection\outputs\checkpoints\lcnn_spectrogram\best.ckpt

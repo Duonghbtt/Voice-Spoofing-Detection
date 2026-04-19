@@ -1,0 +1,22 @@
+{
+  "generated_at": "2026-04-16T11:42:59.153835+00:00",
+  "model": "resnet18",
+  "feature": "mfcc",
+  "checkpoint": "outputs/checkpoints/resnet18_mfcc/best.ckpt",
+  "best_epoch": 18,
+  "metrics_2019": {
+    "eer": 0.14242216130518176,
+    "accuracy": 0.7621601134242038,
+    "num_samples": 71237
+  },
+  "metrics_2021": {
+    "eer": 0.2977464005484296,
+    "accuracy": 0.7948901600259024,
+    "num_samples": 101921
+  },
+  "config": {
+    "batch_size": 128,
+    "num_workers": 0,
+    "device": "cuda"
+  }
+}

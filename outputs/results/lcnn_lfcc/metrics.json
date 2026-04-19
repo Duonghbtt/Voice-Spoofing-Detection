@@ -1,0 +1,22 @@
+{
+  "generated_at": "2026-04-15T12:20:48.584607+00:00",
+  "model": "lcnn",
+  "feature": "lfcc",
+  "checkpoint": "outputs/checkpoints/optimized_lcnn_lfcc/best.ckpt",
+  "best_epoch": 48,
+  "metrics_2019": {
+    "eer": 0.8639271972195677,
+    "accuracy": 0.21084548759773714,
+    "num_samples": 71237
+  },
+  "metrics_2021": {
+    "eer": 0.637154029667594,
+    "accuracy": 0.16101686600406198,
+    "num_samples": 101921
+  },
+  "config": {
+    "batch_size": 96,
+    "num_workers": 0,
+    "device": "cuda"
+  }
+}

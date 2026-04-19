@@ -1,0 +1,2 @@
+profile,model,feature,eer_2019,eer_2021,generalization_gap,checkpoint
+custom,resnet18,spectrogram,0.15605504676780105,0.47487917283812886,0.31882412607032784,D:\Document\Four-year\Second semeter\Học sâu\BTL\Voice-Spoofing-Detection\outputs\checkpoints\resnet18_spectrogram\best.ckpt

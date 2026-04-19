@@ -3,13 +3,26 @@ from .lcnn import LCNN
 from .resnet import ResNet18Spoof
 
 
+MODEL_NAME_ALIASES = {
+    "cnn": "cnn",
+    "lcnn": "lcnn",
+    "resnet": "resnet18",
+    "resnet18": "resnet18",
+}
+
+
+def canonicalize_model_name(model_name: str) -> str:
+    normalized = model_name.strip().lower()
+    if normalized not in MODEL_NAME_ALIASES:
+        raise ValueError(f"Unsupported model name: {model_name}")
+    return MODEL_NAME_ALIASES[normalized]
+
+
 def build_model(model_name: str, in_channels: int = 1, num_classes: int = 2):
-    model_name = model_name.lower()
+    canonical_name = canonicalize_model_name(model_name)
     builders = {
         "cnn": CNNBaseline,
-        "resnet": ResNet18Spoof,
+        "resnet18": ResNet18Spoof,
         "lcnn": LCNN,
     }
-    if model_name not in builders:
-        raise ValueError(f"Unsupported model name: {model_name}")
-    return builders[model_name](in_channels=in_channels, num_classes=num_classes)
+    return builders[canonical_name](in_channels=in_channels, num_classes=num_classes)
